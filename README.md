@@ -10,17 +10,19 @@ Full writeups with proof-of-concept code, reproduction steps, and tooling notes.
 | 4 | [**date_of_birth**](writeups/date_of_birth/) | Reversing — Anti-debug SIGSTOP + signed byte overflow | `6/29/1898` (example for 2026-06-28) |
 | 5 | [**FLRSCRNSVR**](writeups/FLRSCRNSVR/) | Reversing — Windows screensaver, substitution + XOR + reverse | `CMO{frogt4s7ic_r3vers1ng}` |
 | 6 | [**wallpaper**](writeups/wallpaper/) | Reversing — 15-puzzle on hex nibbles, A* solver | `CMO{<37-char move sequence>}` (see writeup) |
+| 7 | [**Matryoshka v2**](writeups/Matryoshka_v2/) | Reversing — 4-layer nested PE, 1.3 MB VM-obfuscated shellcode, RC4 | `CMO{1NsiD3_EV3RY_stOrY_lIe$_an0TH3r_s70Ry_WAITiNG_7o_bE_oPEn3d}` (see writeup) |
 
 Each folder contains a self-contained `README.md` writeup plus a runnable solver script.
 
 ```
 writeups/
-├── maze/           README.md  +  solve.py  +  targets.py
-├── bubbly/         README.md  +  main.py
-├── bitcalc/        README.md  +  solve.c   +  extract.gdb
-├── date_of_birth/  README.md  +  keygen.py
-├── FLRSCRNSVR/     README.md  +  solve.py
-└── wallpaper/      README.md  +  solve.py
+├── maze/            README.md  +  solve.py  +  targets.py
+├── bubbly/          README.md  +  main.py
+├── bitcalc/         README.md  +  solve.c   +  extract.gdb
+├── date_of_birth/   README.md  +  keygen.py
+├── FLRSCRNSVR/      README.md  +  solve.py
+├── wallpaper/       README.md  +  solve.py
+└── Matryoshka_v2/   README.md  +  solve.py
 ```
 
 ---
