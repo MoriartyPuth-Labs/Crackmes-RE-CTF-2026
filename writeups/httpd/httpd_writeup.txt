@@ -1,0 +1,312 @@
+================================================================================
+ httpd - Reverse Engineering Writeup
+================================================================================
+
+Challenge : httpd
+Category  : Reverse Engineering / Malware
+Author    : crudd
+Flag      : CMO{fUn_w1th_m4g1c_p4ck3t5}
+
+Handout   : httpd_handout.zip -> { httpd, README.md }
+Binary    : ELF 64-bit LSB executable, x86-64, FreeBSD 14.3, Go (go1.17.1),
+            dynamically linked, NOT stripped, with debug_info.
+README     : "This file was found on an infected host. Can you figure out what
+             it does?"
+
+DECOY WARNING: The binary is named "httpd" and does serve HTTP, but the HTTP
+listener is a red herring - every request gets "Nothing to see here :{". The
+real payload is a background goroutine that never touches the HTTP path.
+
+
+--------------------------------------------------------------------------------
+ TL;DR
+--------------------------------------------------------------------------------
+httpd masquerades as a web server. At startup it spawns a goroutine that opens a
+libpcap live capture on interface "re0", sets a BPF filter of "icmp", and waits
+for a magic ICMP "knock". A packet matching ALL of:
+
+   ICMP type             (frame off 0x22)            == 8 (echo request)
+   IP total length       (frame off 0x10, big-endian)== 0x0020 (32)
+   ICMP identifier       (frame off 0x26)            == 0x1337
+   ICMP payload[0:4]     (frame off 0x2a)            == 0xe55fdec6 (magic)
+
+...causes the malware to derive a 16-byte AES-128 key from the packet's own
+header bytes, use that key as BOTH key and IV, AES-128-CBC-decrypt a 32-byte
+ciphertext baked into .text, and fmt.Fprintln the plaintext - the flag.
+
+The key depends only on the ICMP checksum word and the IP frag/TTL/proto bytes;
+everything else is pinned by the trigger. That's a tiny search space, so I
+reconstructed the exact key-derivation from the disassembly and brute-forced the
+few unknown bytes OFFLINE - no FreeBSD host, debugger, or live re0 needed.
+
+
+--------------------------------------------------------------------------------
+ APPROACH (how I solved it)
+--------------------------------------------------------------------------------
+Rule going in: reverse the sample first, don't brute-force its output blind.
+The whole solve is static reversing, ending in a tiny offline brute over the
+handful of bytes the disassembly proved were unknown.
+
+Tooling:
+   - Python 3 + pyelftools   (ELF / Go symbol parsing)
+   - capstone                (x86-64 disassembly)
+   - pycryptodome            (AES-128-CBC)
+   - scapy (optional)        (craft the real magic packet / check the checksum)
+
+(file, nm, objdump, strings weren't on the host, so I parsed/disassembled from
+Python - cleaner anyway for a Go binary.)
+
+
+--------------------------------------------------------------------------------
+ 1. INITIAL TRIAGE
+--------------------------------------------------------------------------------
+$ file httpd
+httpd: ELF 64-bit LSB executable, x86-64, version 1 (FreeBSD), dynamically
+linked, for FreeBSD 14.3, Go BuildID=..., with debug_info, not stripped
+
+Go 1.17.1, not stripped, DWARF debug info present -> Go symbol table usable.
+It statically links github.com/google/gopacket (+ .../gopacket/pcap): the first
+hint that this "web server" actually sniffs traffic.
+
+Pull the program's own symbols out of .symtab:
+
+    from elftools.elf.elffile import ELFFile
+    elf = ELFFile(open('httpd','rb'))
+    for s in elf.get_section_by_name('.symtab').iter_symbols():
+        if s.name.startswith('main.'):
+            print(s.name, hex(s['st_value']), s['st_size'])
+
+    main.main      0x747dc0  size 453
+    main.handler   0x747fa0  size 222
+    main..inittask 0x75cf20
+
+Two functions of interest: main.main and main.handler. Everything else is
+stdlib / gopacket.
+
+
+--------------------------------------------------------------------------------
+ 2. BEHAVIOURAL ANALYSIS (the HTTP decoy)
+--------------------------------------------------------------------------------
+Disassemble with capstone, resolving calls/strings against the symbol table:
+
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+    text=elf.get_section_by_name('.text'); tbase=text['sh_addr']; data=text.data()
+    md=Cs(CS_ARCH_X86, CS_MODE_64)
+    def dis(a,n):
+        for i in md.disasm(data[a-tbase:a-tbase+n], a):
+            print(hex(i.address), i.mnemonic, i.op_str)
+    dis(0x747dc0,453)   # main.main
+    dis(0x747fa0,222)   # main.handler
+
+main.main does three things:
+   1) fmt.Fprintln a banner,
+   2) registers main.handler on a net/http.ServeMux and calls
+      net/http.(*Server).ListenAndServe,
+   3) starts a goroutine via runtime.newproc   <-- this is the payload.
+
+main.handler is the decoy:
+   cmp word ptr [rcx], 0x4547      ; 'GE'
+   cmp byte ptr [rcx+2], 0x54      ; 'T'
+   GET  -> io.WriteString(w, "Nothing to see here :{")   (22 bytes)
+   else -> net/http.Error(w, "Method not allowed", 405)  (18 bytes)
+
+The lea feeding runtime.newproc loads a closure whose funcval entry resolves to
+0x748080 (right after main.handler). That goroutine is the malware.
+
+
+--------------------------------------------------------------------------------
+ 3. THE GOROUTINE PAYLOAD (0x748080)
+--------------------------------------------------------------------------------
+Disassembling from 0x748080, the setup:
+
+   ; pcap.OpenLive("re0", 1600, true, BlockForever)
+   lea  rax, ["re0"]                ; iface
+   mov  [rsp+8], 3                  ; len("re0")
+   mov  [rsp+0x10], 0x640           ; snaplen = 1600
+   mov  [rsp+0x14], 1               ; promiscuous = true
+   mov  [rsp+0x18], 0xffffffffff676980   ; timeout = BlockForever
+   call pcap.OpenLive
+
+   ; handle.SetBPFFilter("icmp")
+   lea  rcx, ["icmp"]  ; mov [rsp+0x10], 4
+   call pcap.(*Handle).SetBPFFilter
+
+   call pcap.(*Handle).pcapDatalink
+   call gopacket.(*PacketSource).Packets   ; returns a channel
+
+Then "for range packets" (runtime.chanrecv2). For each packet it calls
+Packet.Data() (call rax), bounds-checks length, and inspects fixed frame offsets.
+
+
+--------------------------------------------------------------------------------
+ 4. TRIGGER CONDITIONS (the "magic packet")
+--------------------------------------------------------------------------------
+With Ethernet(14)+IP(20)+ICMP, offsets line up exactly:
+
+   cmp word  ptr [rdx+0x26], 0x1337       ; ICMP identifier == 0x1337
+   movzx ebx, word ptr [rdx+0x10]         ; IP total length
+   rol  bx, 8                             ; -> host order
+   cmp  bx, 0x20                          ; == 32
+   cmp  dword ptr [rdx+0x2a], 0xe55fdec6  ; ICMP payload[0:4] == magic
+   cmp  byte  ptr [rdx+0x22], 8           ; ICMP type == 8 (echo request)
+
+Trigger = a 32-byte IP packet: ICMP echo request, id 0x1337, payload 0xe55fdec6.
+
+BYTE-ORDER GOTCHA: these are x86 little-endian reads, so the compared values are
+byte-swapped ON THE WIRE: identifier bytes = 37 13, payload bytes = c6 de 5f e5.
+If you craft with scapy you use ICMP(id=0x3713) and payload b"\xc6\xde\x5f\xe5",
+and the malware's LE reads then see 0x1337 / 0xe55fdec6. It does NOT affect the
+key/flag, because the key derivation reads the same raw frame bytes.
+
+
+--------------------------------------------------------------------------------
+ 5. THE KEY DERIVATION (0x74827e .. 0x748459)
+--------------------------------------------------------------------------------
+Let W = 16-bit little-endian word at frame off 0x24 (ICMP checksum field),
+and IP[0x14:0x18] = the 4 IP-header bytes at off 0x14 (flags/frag(2)+TTL(1)+proto(1)).
+The 16-byte key (== IV) is:
+
+   key[0:2]   = big-endian( 0xe55f ^ W )           ; magic-hi XOR cksum, byteswapped
+   key[2:6]   = IP[0x14:0x18]                       ; frag(2)+TTL(1)+proto(1) verbatim
+   key[6:8]   = W                                   ; checksum word, little-endian
+   key[8:12]  = 0xe55fdec6   (LE: c6 de 5f e5)      ; the magic constant
+   key[12:14] = 0x1337       (LE: 37 13)            ; the ICMP id
+   key[14:16] = big-endian( (W ^ 0xdec6) & 0xffff ) ; magic-lo XOR cksum, byteswapped
+
+Only TWO things vary: the checksum word W (16 bits) and the IP frag/TTL/proto
+bytes. Everything else is fixed -> tiny key space.
+
+
+--------------------------------------------------------------------------------
+ 6. EMBEDDED CIPHERTEXT + AES-128-CBC DECRYPT
+--------------------------------------------------------------------------------
+   movabs rcx, 0xc07edfb429a5f151 ; [obj+0x00]
+   movabs rcx, 0xb34e3d248f2f3b2a ; [obj+0x08]
+   movabs rcx, 0x8cdd9c0bcfb0ed5a ; [obj+0x10]
+   movabs rcx, 0x0c64c43e9b0ee6cd ; [obj+0x18]
+   ...
+   call crypto/aes.NewCipher          ; key length 0x10 -> AES-128
+   call crypto/cipher.NewCBCDecrypter ; iv = same key buffer
+   call <blockmode>.CryptBlocks       ; decrypt 32 bytes
+   call runtime.slicebytetostring
+   call fmt.Fprintln                  ; print the flag
+
+32-byte ciphertext (LE qwords, in order):
+   51 f1 a5 29 b4 df 7e c0 2a 3b 2f 8f 24 3d 4e b3
+   5a ed b0 cf 0b 9c dd 8c cd e6 0e 9b 3e c4 64 0c
+
+Secret = AES-128-CBC-decrypt(ct, key=K, iv=K), K from the magic packet (sec 5).
+
+
+--------------------------------------------------------------------------------
+ 7. RECOVERING THE KEY (offline brute force) - the script I ran
+--------------------------------------------------------------------------------
+Unknowns: W (16 bits) and IP[0x14:0x18] (realistic: proto=1, frag in {0,0x4000},
+TTL in {64,128,255,...}). Reconstruct sec-5 derivation, sweep W, AES-CBC-decrypt,
+stop at "CMO{":
+
+    import struct
+    from Crypto.Cipher import AES
+
+    qs = [0xc07edfb429a5f151, 0xb34e3d248f2f3b2a,
+          0x8cdd9c0bcfb0ed5a, 0x0c64c43e9b0ee6cd]
+    CT = b''.join(struct.pack('<Q', q) for q in qs)
+    MAGIC, ID = 0xe55fdec6, 0x1337
+
+    def build_key(W, b14, b15, ttl, proto=0x01):
+        v = (0xe55f ^ W) & 0xffff
+        u = (W ^ 0xdec6) & 0xffff
+        k = bytearray(16)
+        k[0], k[1]   = (v >> 8) & 0xff, v & 0xff
+        k[2:6]       = bytes([b14, b15, ttl, proto])
+        k[6], k[7]   = W & 0xff, (W >> 8) & 0xff
+        k[8:12]      = struct.pack('<I', MAGIC)
+        k[12], k[13] = ID & 0xff, (ID >> 8) & 0xff
+        k[14], k[15] = (u >> 8) & 0xff, u & 0xff
+        return bytes(k)
+
+    for frag in (0x0000, 0x4000):
+        for ttl in (64, 128, 255, 63, 127):
+            for W in range(0x10000):
+                k  = build_key(W, (frag >> 8) & 0xff, frag & 0xff, ttl)
+                pt = AES.new(k, AES.MODE_CBC, iv=k).decrypt(CT)
+                if pt[:4] == b'CMO{':
+                    pad = pt[-1]
+                    print('frag=%04x ttl=%d W=%04x' % (frag, ttl, W))
+                    print('key/iv =', k.hex())
+                    print('FLAG   =', pt[:-pad].decode())
+
+Output:
+    frag=4000 ttl=64 W=279a
+    key/iv = c2c5400040019a27c6de5fe53713f95c
+    FLAG   = CMO{fUn_w1th_m4g1c_p4ck3t5}
+
+Raw plaintext = CMO{fUn_w1th_m4g1c_p4ck3t5}\x05\x05\x05\x05\x05  -> valid PKCS#7
+padding (pad=5), confirming the AES-CBC interpretation.
+
+
+--------------------------------------------------------------------------------
+ 8. END-TO-END SANITY CHECK (optional, scapy)
+--------------------------------------------------------------------------------
+Prove W=0x279a is a real checksum-valid packet. Craft the knock, read back the
+checksum scapy computes; the matching packet is seq=1 (cksum 0x9a27 -> W=0x279a):
+
+    from scapy.all import IP, ICMP, raw
+    for seq in range(8):
+        f = raw(IP(flags='DF', ttl=64)/ICMP(type=8, id=0x3713, seq=seq)/b'\xc6\xde\x5f\xe5')
+        W = f[0x16] | (f[0x17] << 8)        # checksum word (IP-only frame: 0x24-14)
+        print('seq=%d cksum_wire=%02x%02x W=0x%04x' % (seq, f[0x16], f[0x17], W))
+    # seq=1 -> cksum_wire=9a27 W=0x279a   -> matches the brute-forced key
+
+So the attacker's trigger was: ICMP echo-request, id wire-bytes 37 13, seq=1,
+payload c6 de 5f e5, IP total length 32 (DF, TTL 64). Feed it to a running httpd
+and it prints the flag.
+
+
+--------------------------------------------------------------------------------
+ 9. REPRODUCTION
+--------------------------------------------------------------------------------
+    unzip httpd_handout.zip                 # -> httpd, README.md
+    pip install pyelftools capstone pycryptodome
+    # 1) parse symbols + disassemble main.main / 0x748080 (sections 1-6)
+    # 2) run the brute-force in section 7 -> CMO{fUn_w1th_m4g1c_p4ck3t5}
+
+Real run (FreeBSD + re0): ./httpd as root, send the section-8 packet from another
+host; httpd prints the flag to stdout.
+
+
+--------------------------------------------------------------------------------
+ APPENDIX: CAPTURED DATA
+--------------------------------------------------------------------------------
+Flag:
+   CMO{fUn_w1th_m4g1c_p4ck3t5}
+
+Embedded AES-128-CBC ciphertext (32 bytes):
+   51 f1 a5 29 b4 df 7e c0 2a 3b 2f 8f 24 3d 4e b3
+   5a ed b0 cf 0b 9c dd 8c cd e6 0e 9b 3e c4 64 0c
+
+Recovered key == IV:
+   c2 c5 40 00 40 01 9a 27 c6 de 5f e5 37 13 f9 5c
+
+Magic packet (on the wire):
+   ICMP echo-request  type=8  id-bytes=37 13  seq=1  payload=c6 de 5f e5
+   IP total length=32, flags=DF, TTL=64, proto=1
+
+Key addresses:
+   0x747dc0              main.main (banner + HTTP setup + newproc)
+   0x747fa0              main.handler (HTTP decoy: "Nothing to see here :{")
+   0x748080              goroutine payload - pcap.OpenLive("re0",1600,promisc,BlockForever)
+   0x748123             SetBPFFilter("icmp")
+   0x74845e .. 0x74849e  magic-packet trigger compares
+   0x74827e .. 0x748459  16-byte key derivation from packet bytes
+   0x7484d2 .. 0x748505  32-byte ciphertext movabs immediates
+   0x748525             crypto/aes.NewCipher (AES-128)
+   0x7485a5             crypto/cipher.NewCBCDecrypter (iv == key)
+   0x748696             fmt.Fprintln (prints the flag)
+
+Constants:
+   0xe55fdec6   ICMP payload magic (wire c6 de 5f e5); key bytes [8:12]
+   0x1337       ICMP identifier   (wire 37 13);        key bytes [12:14]
+   0x0020       required IP total length
+   8            required ICMP type (echo request)
+================================================================================

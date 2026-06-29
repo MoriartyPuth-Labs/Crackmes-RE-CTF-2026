@@ -11,6 +11,7 @@ Full writeups with proof-of-concept code, reproduction steps, and tooling notes.
 | 5 | [**FLRSCRNSVR**](writeups/FLRSCRNSVR/) | Reversing — Windows screensaver, substitution + XOR + reverse | `CMO{frogt4s7ic_r3vers1ng}` |
 | 6 | [**wallpaper**](writeups/wallpaper/) | Reversing — 15-puzzle on hex nibbles, A* solver | `CMO{<37-char move sequence>}` (see writeup) |
 | 7 | [**Matryoshka v2**](writeups/Matryoshka_v2/) | Reversing — 4-layer nested PE, 1.3 MB VM-obfuscated shellcode, RC4 | `CMO{1NsiD3_EV3RY_stOrY_lIe$_an0TH3r_s70Ry_WAITiNG_7o_bE_oPEn3d}` (see writeup) |
+| 8 | [**httpd**](writeups/httpd/) | Reversing / Malware — Go port-knocker masquerading as web server, ICMP magic packet, AES-128-CBC | `CMO{fUn_w1th_m4g1c_p4ck3t5}` |
 
 Each folder contains a self-contained `README.md` writeup plus a runnable solver script.
 
@@ -22,7 +23,8 @@ writeups/
 ├── date_of_birth/   README.md  +  keygen.py
 ├── FLRSCRNSVR/      README.md  +  solve.py
 ├── wallpaper/       README.md  +  solve.py
-└── Matryoshka_v2/   README.md  +  solve.py
+├── Matryoshka_v2/   README.md  +  solve.py
+└── httpd/           README.md  +  httpd_writeup.txt
 ```
 
 ---
@@ -50,6 +52,7 @@ gcc -O2 -o solve writeups/bitcalc/solve.c
 - **date_of_birth** — Anti-debug SIGSTOP is trivially bypassed; the real challenge is the signed-byte overflow in the year check (`0x7F+1 = -128`), which collapses an infinite search space to a handful of dates.
 - **FLRSCRNSVR** — Registry-backed screensavers still store plaintext transform parameters in `.rodata`; three-step invertible ciphers invert in three lines of Python.
 - **wallpaper** — Hardcoded puzzle states in `.rodata` give away the entire challenge; Manhattan-distance A* finds a 37-move solution instantly.
+- **httpd** — The binary name is a decoy; a background goroutine opens a libpcap sniffer and gates on a magic ICMP knock. The key derivation touches only a few packet header bytes, making the key space tiny enough to brute-force offline without any FreeBSD host.
 
 ---
 
