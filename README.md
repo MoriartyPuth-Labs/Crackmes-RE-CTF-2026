@@ -12,6 +12,8 @@ Full writeups with proof-of-concept code, reproduction steps, and tooling notes.
 | 6 | [**wallpaper**](writeups/wallpaper/) | Reversing — 15-puzzle on hex nibbles, A* solver | `CMO{<37-char move sequence>}` (see writeup) |
 | 7 | [**Matryoshka v2**](writeups/Matryoshka_v2/) | Reversing — 4-layer nested PE, 1.3 MB VM-obfuscated shellcode, RC4 | `CMO{1NsiD3_EV3RY_stOrY_lIe$_an0TH3r_s70Ry_WAITiNG_7o_bE_oPEn3d}` (see writeup) |
 | 8 | [**httpd**](writeups/httpd/) | Reversing / Malware — Go port-knocker masquerading as web server, ICMP magic packet, AES-128-CBC | `CMO{fUn_w1th_m4g1c_p4ck3t5}` |
+| 9 | [**a matter of time**](writeups/a_matter_of_time/) | Reversing — Windows PE, timestamp-keyed decryption, time hook + memory dump | `CMO{5h3_p4St_1s_t0_l34rn_fr0M_n0T_t0_l1V3_1n}` |
+| 10 | [**CryptPad**](writeups/cryptPad/) | Reversing / Crypto — custom cipher on `flag.enc`, roll-your-own crypto | `CMO{r0ll_y0ur_0wn_b4d_c0d3}` |
 
 Each folder contains a self-contained `README.md` writeup plus a runnable solver script.
 
@@ -24,7 +26,9 @@ writeups/
 ├── FLRSCRNSVR/      README.md  +  solve.py
 ├── wallpaper/       README.md  +  solve.py
 ├── Matryoshka_v2/   README.md  +  solve.py
-└── httpd/           README.md  +  httpd_writeup.txt
+├── httpd/           README.md  +  httpd_writeup.txt
+├── a_matter_of_time/ README.md  +  solve.py  +  memdump.py  +  timehook.py
+└── cryptPad/        WRITEUP.md  +  solve.py
 ```
 
 ---
@@ -53,6 +57,8 @@ gcc -O2 -o solve writeups/bitcalc/solve.c
 - **FLRSCRNSVR** — Registry-backed screensavers still store plaintext transform parameters in `.rodata`; three-step invertible ciphers invert in three lines of Python.
 - **wallpaper** — Hardcoded puzzle states in `.rodata` give away the entire challenge; Manhattan-distance A* finds a 37-move solution instantly.
 - **httpd** — The binary name is a decoy; a background goroutine opens a libpcap sniffer and gates on a magic ICMP knock. The key derivation touches only a few packet header bytes, making the key space tiny enough to brute-force offline without any FreeBSD host.
+- **a matter of time** — Timestamp-keyed decryption sounds time-sensitive but isn't; hook `GetSystemTime` / `GetLocalTime` to feed a fixed date, then dump the decrypted flag from memory.
+- **CryptPad** — Roll-your-own crypto on `flag.enc`; static reversal of the custom cipher is enough to recover the plaintext without ever running the binary.
 
 ---
 

@@ -1,0 +1,201 @@
+================================================================================
+ a_matter_of_time.exe  -  WRITE-UP
+ Crackmes.one Reverse Engineering CTF 2026   |   Author: [@heapsoverflow]
+ Category: Reversing   |   Binary: PE32+ x86-64 (MSVC)   |   Flag: CMO{...}
+================================================================================
+
+FLAG: CMO{5h3_p4St_1s_t0_l34rn_fr0M_n0T_t0_l1V3_1n}
+      ("the past is to learn from, not to live in")
+
+
+--------------------------------------------------------------------------------
+ TL;DR
+--------------------------------------------------------------------------------
+Obfuscated (custom "bin2bin") crackme, gated on a 4-hour CTF time window.
+Flag is AES-CBC-128:
+  * KEY = "nicetryboogeyman"  (author's username, leaked in the PDB path; 16 bytes)
+  * IV  = "amalgamated value from UNIX decimal timestamps" = 16-digit zero-padded
+          ASCII decimal string (real amalgam value = 537068053 -> "0000000537068053")
+  * CT  = 48 bytes (3 blocks), recovered from binary / live process memory.
+
+You do NOT need to beat the time gate. In CBC, plaintext blocks >= 1 depend only
+on the key, so most of the flag drops out with the key alone; only block 0 needs
+the IV, recovered via the known plaintext "CMO{" + the timestamp format.
+
+
+--------------------------------------------------------------------------------
+ 1. TOOLS
+--------------------------------------------------------------------------------
+  - Python 3
+  - capstone        (disassembly)
+  - pefile          (PE sections / imports / IAT)
+  - pycryptodome    (AES)
+  - custom ctypes Windows debugger  (timehook.py, memdump.py)
+  - solve.py        (final offline PoC)
+  No IDA/Ghidra/x64dbg required.
+
+
+--------------------------------------------------------------------------------
+ 2. TRIAGE
+--------------------------------------------------------------------------------
+file -> PE32+ executable (console) x86-64, MS Windows, 7 sections.
+
+Sections:
+  .text   VA 0x1000   size 0x9800
+  .rdata  VA 0xb000   size 0x5200
+  .data   VA 0x11000
+  .pdata  VA 0x12000
+  .rsrc   VA 0x13000
+  .reloc  VA 0x14000
+  .ch     VA 0x15000  size 0x13a00   <-- non-standard, holds the bulk + real code
+
+Red flags:
+  * ".ch" begins with an x64 prologue (48 89 5c 24 18 ...) => it contains CODE.
+  * .pdata only covers .text, NOT .ch. MSVC always emits unwind for x64, so .ch
+    is a post-link obfuscator artifact. Author: "obfuscated with my own bin2bin".
+
+Useful findings:
+  * PDB path: C:\Users\nicetryboogeyman\cmo\x64\Release\cmo.pdb
+      -> username "nicetryboogeyman" (16 chars).
+  * Strings: "Hex string must have even length", "invalid stoi argument",
+             "Internal error loading IANA database information".
+  * Imports: GetSystemTimeAsFileTime, __std_tzdb_get_time_zones,
+             __std_tzdb_get_leap_seconds, LookupAccountSidW, GetTokenInformation,
+             OpenProcessToken, CreateProcessW, CreateMutexW, getchar, strtol.
+  * All user-facing strings are ENCRYPTED (none in plaintext).
+
+Runtime output (piping ENTER):
+  > Welcome to ... Crackmes.one Reverse Engineering CTF 2026!
+  > 'Tempus Fugit' ... Seize it once, or it's gone to the end.
+  *Journal entry from January 19, 2038 by [@heapsoverflow]
+  Press ENTER if you read...
+  Time's up. Every old system switched to 64-bit but at what cost...
+  Wrong timing.
+
+Hypothesis: time-gated crackme. The "January 19, 2038 / 64-bit" theme is Year-2038
+flavor (time_t overflow, 0x7FFFFFFF). The REAL working window is the CTF slot:
+Feb 17 20:00 -> Feb 18 00:00 GMT (2026).
+
+
+--------------------------------------------------------------------------------
+ 3. OBFUSCATION (bin2bin)
+--------------------------------------------------------------------------------
+  * Control-flow flattening + junk bytes: linear disassembly desyncs; basic blocks
+    reached via a junk dispatcher with always-taken jo/jno (and jl/jge) pairs.
+  * String encryption: strings are built at runtime - the code movdqa-loads
+    scrambled 16-byte chunks from .rdata onto the stack, appends immediate bytes,
+    then calls an in-place decoder. Transform = XOR-by-index (buf[i] ^= i) over the
+    assembled buffer. Chunks are permuted in .rdata, so naive contiguous decode
+    only works for some strings.
+
+Faster than fully reversing the string builder: let the binary decode its own
+strings and read them from memory.
+
+
+--------------------------------------------------------------------------------
+ 4. STEPPING INTO THE MACHINE - ctypes debugger
+--------------------------------------------------------------------------------
+A small pure-Python (ctypes) Win32 debugger:
+  1. CreateProcessW(..., DEBUG_ONLY_THIS_PROCESS), stdin/stdout via pipes
+     (feed "\r\n" for getchar; capture output incl. spawned children).
+  2. WaitForDebugEvent / ContinueDebugEvent loop.
+  3. Hook time APIs: write 0xCC at the export entry, and on hit EMULATE the whole
+     function (write value to *RCX, RIP=[RSP], RSP+=8).
+  4. At a breakpoint, walk memory via VirtualQueryEx + ReadProcessMemory and regex
+     printable strings.
+
+4a. Which time API?
+    Hooking kernel32!GetSystemTimeAsFileTime/Precise -> 0 hits (modern Win10/11
+    std::chrono reaches the clock via ntdll!NtQuerySystemTime / KUSER_SHARED_DATA).
+    Hooking NtQuerySystemTime -> 3 hits.
+    NOTE: injecting any timestamp via NtQuerySystemTime did NOT change the gate
+    (it reads time via a path that bypasses the hook). Doesn't matter - we solve
+    offline.
+
+4b. Memory dump -> ciphertext
+    Committed-memory dump revealed already-decoded constants, including:
+      - 2147483647  (the 2038 timestamp - flavor)
+      - AES ciphertext hex:
+        4c4635258cf6eca5d80b8e050a9e5b04
+        f1a9c979bc55f3f4773971ed2f81a969
+        67bb3569fa002f549cc970a18779b3a7   (48 bytes)
+
+
+--------------------------------------------------------------------------------
+ 5. BREAKING THE CRYPTO (offline)
+--------------------------------------------------------------------------------
+AES-CBC-128. key = b"nicetryboogeyman" (16 bytes). ct = 48 bytes above.
+
+5a. Blocks >= 1 need only the KEY.
+    P_i = AES_dec(C_i) XOR C_{i-1}  for i >= 1.
+    Decrypt with zero IV -> block0 garbage, but bytes 16-47 correct:
+       b't0_l34rn_fr0M_n0T_t0_l1V3_1n}\x03\x03\x03'   (valid PKCS#7 pad of 3)
+    => key + ciphertext alignment confirmed; second half of the flag obtained.
+
+5b. Block 0 needs the IV; known plaintext fixes the prefix.
+    dec0 = AES_dec(C_0)   (single-block ECB decrypt)
+    IV[i] = dec0[i] XOR P0[i] ; P0[0:4] = "CMO{"  => IV[0:4] = "0000"
+    => IV is a zero-padded decimal string (matches "amalgamated UNIX timestamps").
+
+5c. The IV value.
+    Real amalgam = 537068053  => IV = b"0000000537068053".
+    AES-CBC decrypt with this IV:
+       CMO{5h3_p4St_1s_t0_l34rn_fr0M_n0T_t0_l1V3_1n}
+
+    Intended "educated brute force": the gate restricts to the Feb-2026 window and
+    the IV derives from a timestamp; a player either runs it in-window (program
+    builds the real IV) or brute-forces the timestamp/format offline against the
+    known plaintext "CMO{".
+
+5d. HONEST NOTE ON UNIQUENESS (!!):
+    "IV = 16 ASCII digits" narrows but does NOT uniquely fix block 0. Where two
+    readable leet chars are both reachable via XOR with a digit, the choice is
+    ambiguous (~8.7e10 wordchar block-0 readings satisfy the constraint).
+    Example: CMO{5h3_p4St_1s_...} (IV 537068053)  and
+             CMO{7h3_p4St_1s_...} (IV 200537068053)
+    BOTH yield valid all-digit IVs and both read as "the". Only the REAL IV value
+    disambiguates. The official flag uses 5h3.
+
+
+--------------------------------------------------------------------------------
+ 6. REPRODUCTION
+--------------------------------------------------------------------------------
+  # 1. deps
+  pip install pycryptodome pefile capstone
+
+  # 2. offline solve (no execution needed)
+  python solve.py
+      -> CMO{5h3_p4St_1s_t0_l34rn_fr0M_n0T_t0_l1V3_1n}
+
+  # 3. (optional, Windows) dynamic ciphertext recovery
+  python memdump.py
+  grep -aoE "[0-9a-f]{40,}" memdump_strings.txt
+
+  # 4. (optional, Windows) time-API hook experiment
+  python timehook.py 134158392000000000   # FILETIME inside the Feb-2026 window
+
+  (memdump.py / timehook.py are Windows-only; solve.py is the canonical PoC.)
+
+
+--------------------------------------------------------------------------------
+ 7. FILES
+--------------------------------------------------------------------------------
+  solve.py     - canonical offline PoC (recovers + verifies the flag)
+  timehook.py  - ctypes debugger; hooks time APIs and forces a timestamp
+  memdump.py   - ctypes debugger; dumps process strings (found the ciphertext)
+  README.md    - markdown write-up
+  writeup.txt  - this file
+
+
+--------------------------------------------------------------------------------
+ 8. TAKEAWAYS
+--------------------------------------------------------------------------------
+  1. CBC leaks: blocks >= 1 need only the key - recover most of a flag pre-IV.
+  2. Known plaintext (CMO{) yields IV bytes and reveals the IV format.
+  3. Don't over-trust a charset constraint for uniqueness; it narrows, not solves.
+  4. The flashy theme can be misdirection (2038 was flavor; gate = CTF window).
+  5. A ~200-line ctypes debugger beats fighting a flattened/obfuscated binary
+     statically - let it decode its own strings and read its memory.
+  6. Keys hide in build artifacts - always check the PDB path.
+
+================================================================================
