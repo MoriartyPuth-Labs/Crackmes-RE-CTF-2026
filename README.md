@@ -14,6 +14,8 @@ Full writeups with proof-of-concept code, reproduction steps, and tooling notes.
 | 8 | [**httpd**](writeups/httpd/) | Reversing / Malware — Go port-knocker masquerading as web server, ICMP magic packet, AES-128-CBC | `CMO{fUn_w1th_m4g1c_p4ck3t5}` |
 | 9 | [**a matter of time**](writeups/a_matter_of_time/) | Reversing — Windows PE, timestamp-keyed decryption, time hook + memory dump | `CMO{5h3_p4St_1s_t0_l34rn_fr0M_n0T_t0_l1V3_1n}` |
 | 10 | [**CryptPad**](writeups/cryptPad/) | Reversing / Crypto — custom cipher on `flag.enc`, roll-your-own crypto | `CMO{r0ll_y0ur_0wn_b4d_c0d3}` |
+| 11 | [**connected**](writeups/connected/) | Reversing / Crackme — automotive security binary, static analysis | `CMO{secret_code_v9hcdkd2}` |
+| 12 | [**what did you type**](writeups/what_did_you_type/) | Forensics / RE — USB HID keylog capture, HID scan-code decode | `CMO{Dumb357_P3r50n_1n_7h3_M1lky_W4y_!!!}` |
 
 Each folder contains a self-contained `README.md` writeup plus a runnable solver script.
 
@@ -28,7 +30,9 @@ writeups/
 ├── Matryoshka_v2/   README.md  +  solve.py
 ├── httpd/           README.md  +  httpd_writeup.txt
 ├── a_matter_of_time/ README.md  +  solve.py  +  memdump.py  +  timehook.py
-└── cryptPad/        WRITEUP.md  +  solve.py
+├── cryptPad/        WRITEUP.md  +  solve.py
+├── connected/       README.md  +  solve.py
+└── what_did_you_type/ WRITEUP.md  +  solve.py  +  decode_hid.py
 ```
 
 ---
@@ -59,6 +63,8 @@ gcc -O2 -o solve writeups/bitcalc/solve.c
 - **httpd** — The binary name is a decoy; a background goroutine opens a libpcap sniffer and gates on a magic ICMP knock. The key derivation touches only a few packet header bytes, making the key space tiny enough to brute-force offline without any FreeBSD host.
 - **a matter of time** — Timestamp-keyed decryption sounds time-sensitive but isn't; hook `GetSystemTime` / `GetLocalTime` to feed a fixed date, then dump the decrypted flag from memory.
 - **CryptPad** — Roll-your-own crypto on `flag.enc`; static reversal of the custom cipher is enough to recover the plaintext without ever running the binary.
+- **connected** — Automotive crackme; static analysis of the validation routine yields the secret code directly.
+- **what did you type** — USB HID keylog capture; decode HID scan codes to ASCII and read back what was typed.
 
 ---
 
