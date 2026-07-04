@@ -68,16 +68,17 @@ gcc -O2 -o solve writeups/bitcalc/solve.c
 
 ---
 
-## Author
+## 👤 Author
 
-<div align="center">
+**MoriartyPuth** — Offensive Security
 
-**Eav Puthcambo**
-<br/>
-AUPP Cybersecurity Programme
-<br/>
-American University of Phnom Penh
-
-[![GitHub](https://img.shields.io/badge/GitHub-MoriartyPuth--Labs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MoriartyPuth-Labs)
+![GitHub](https://img.shields.io/badge/GitHub-MoriartyPuth-181717?logo=github)
 
 </div>
+
+> ⚠️ **Disclaimer.** _This document is a writeup produced from ctf challenges
+> All challenge details pertain strictly to intentionally vulnerable, isolated competition infrastructure
+> documentation-reserved placeholders. It contains no client data, no live targets and no
+> novel exploit code. Techniques shown are standard, publicly documented, and provided for
+> educational and defensive purposes only. Do not test any system you do not own or lack
+> explicit written authorisation to assess._
